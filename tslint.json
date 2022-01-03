@@ -1,0 +1,18 @@
+{
+  "defaultSeverity": "error",
+  "extends": [
+    "tslint:recommended"
+  ],
+  "jsRules": {},
+  "rules": {
+  },
+  "linterOptions": {
+    "exclude": [
+      "src/printJobServer/wsdl/generated/**"
+    ],
+    "include": [
+      "../ui/src/common/**"
+    ]
+  },
+  "rulesDirectory": []
+}

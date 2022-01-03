@@ -1,3 +1,7 @@
+/lib/
+/coverage
+.idea
+
 # Logs
 logs
 *.log
