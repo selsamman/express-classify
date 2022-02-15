@@ -1,6 +1,6 @@
 {
   "name": "express-classify",
-  "version": "1.0.4",
+  "version": "1.0.10",
   "description": "Typescript round trip browser to express server with sessions and socket.io",
   "main": "./lib/cjs/index.js",
   "module": "./lib/esm/index.js",
@@ -29,13 +29,13 @@
     "publish": "yarn build && npm publish"
   },
   "dependencies": {
-    "js-freeze-dry": "^1.0.0",
+    "@types/express-session": "^1.17.4",
+    "@types/socket.io": "^3.0.2",
     "express": "^4.17.1",
     "express-session": "^1.17.2",
+    "js-freeze-dry": "^1.0.0",
     "memorystore": "^1.6.6",
-    "socket.io": "^4.3.2",
-    "socket.io-express-session": "^0.1.3",
-    "@types/express-session": "^1.17.4",
-    "@types/socket.io": "^3.0.2"
+    "socket.io": "^4.4.0",
+    "socket.io-express-session": "^0.1.3"
   }
 }

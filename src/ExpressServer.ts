@@ -1,4 +1,4 @@
-import {Server} from "socket.io";
+import {Server, Socket} from "socket.io";
 import express, {Express, RequestHandler} from "express";
 import Session, {SessionOptions, Store} from "express-session";
 import createMemoryStore from "memorystore";
@@ -14,12 +14,11 @@ declare module "express-session" {
 
 export class ExpressServer {
 
-
     io: Server = undefined as unknown as Server; // SocketIO
     app: Express = undefined as unknown as Express; // Express
     session:  RequestHandler = undefined as unknown as RequestHandler;
     sessionOptions : SessionOptions = {
-        //cookie: { maxAge: 86400000 },
+        cookie: { maxAge: 86400000 }, // 24 hours
         resave: true,
         saveUninitialized: true,
         secret: 'keyboard cat'
@@ -59,10 +58,9 @@ export class ExpressServer {
     }
 
     createEndPoint<T, T2>(urlPrefix : any, serverClass : new () => T, clientClass : new () => T2,
-                          authorizer? : (endPoint: T, method: string, args: IArguments) => boolean, classes: any = {}) {
+                          authorizer? : (endPoint: T, method: string, args: IArguments) => Promise<boolean>, classes: any = {}) {
         this.endPoints.set(serverClass, {urlPrefix, clientClass, classes, authorizer});
     }
-
 
     start () {
 
@@ -102,6 +100,19 @@ export class ExpressServer {
         io.use(wrap(this.session));
 
         this.io = io;
+
+        this.io.on("connection", (socket : Socket) => {
+            socket.on("disconnect", (reason) => {
+                if (this.logLevel.connect)
+                    this.log(`Socket.io client disconnected ${socket.id} ${reason}`);
+            });
+            // @ts-ignore
+            const session = socket.handshake.session;
+            if (this.logLevel.connect)
+                this.log(`Socket.io client connected to socket ${socket.id} with session ${session.id}`);
+            session.socketId = socket.id;
+            session.save();
+        });
     }
 
     async enumerateSessions<TS, TC> (cb : (
@@ -209,9 +220,8 @@ export class ExpressServer {
                         expressServer.log(`Request ${endPoint} emitting`);
 
                     // Make requests and parse response
-                    if (!(this as any).__socket__)
-                        throw new Error (`Missing socket for ${urlPrefix} request - must be used with enumerateSessions`);
-                    (this as any).__socket__.emit(endPoint, payload);
+                    if ((this as any).__socket__)
+                        (this as any).__socket__.emit(endPoint, payload);
 
                     // Catch any exception so it can be logged and then rethrown
                 } catch (e: any) {
@@ -250,11 +260,11 @@ export class ExpressServer {
         Object.assign(thisEndPoint, deserialize(session.endPoints[urlPrefix], classes).session);
 
         return thisEndPoint;
-
     }
+
     private createEndPoints<T extends ServerEndPoints, T2>
     (urlPrefix : any, serverClass : new () => T, clientClass : new () => T2, classes : any,
-     authorizer? : (endPoint: T, method: string, args: IArguments) => boolean) {
+     authorizer? : (endPoint: T, method: string, args: IArguments) => Promise<boolean>) {
 
         const log = this.log || (message => console.log(message));
         const logLevel = this.logLevel || EndPointsLogging;
@@ -286,15 +296,15 @@ export class ExpressServer {
                         throw new Error(msg);
                     }
 
-                    // Check authorization
-                    if (!authorizer || authorizer(thisEndPoint as any, name, requestData.args)) {
+                    thisEndPoint.__request__ = {
+                        listenerData : {},
+                        sessionId : req.session.id,
+                        expressServer : this,
+                        classes, urlPrefix, session: req.session
+                    }
 
-                        thisEndPoint.__request__ = {
-                            listenerData : {},
-                            sessionId : req.session.id,
-                            expressServer : this,
-                            classes, urlPrefix, session: req.session
-                        }
+                    // Check authorization
+                    if (!authorizer || await authorizer(thisEndPoint as any, name, requestData.args)) {
 
                         // Call the method and serialize results
 
@@ -310,7 +320,6 @@ export class ExpressServer {
                             log(`Endpoint ${name} responded successfully`);
 
                         await thisEndPoint.saveSession();
-                        thisEndPoint.__request__ = undefined;
 
                         // Send result to client
                         res.send({json});
@@ -323,10 +332,11 @@ export class ExpressServer {
 
                     // Send exception
                     const listenerContent = thisEndPoint.__request__?.listenerData;
-                    thisEndPoint.__request__ = undefined
+
                     res.send({json: serialize({exception: e.message, listenerContent},classes)});
 
                 }
+                thisEndPoint.__request__ = undefined
             });
 
             if (logLevel.create)
@@ -358,21 +368,29 @@ export class ExpressServer {
         const request = new clientClass();
         (request as any).__socket__ = socket;
         return request;
-
     }
+    async getEndPoint <TS>(serverClass : new () => TS, sessionId : any) {
+        const session = await this.getSessionFromSessionId(sessionId);
+        const endPointDef = this.endPoints.get(serverClass);
+        if (!endPointDef)
+            throw new Error ('attempt to fetch endpoint ${serverClass?.name} that was not setup with request');
+        return this.instantiateEndPoint(endPointDef.urlPrefix, session, serverClass, endPointDef.classes);
+    }
+
 }
 
 interface EndPoint <ServerClass, ClientClass> {
     urlPrefix: string;
     clientClass : new () => ClientClass;
     classes: any;
-    authorizer : ((endPoint: ServerClass, method: string, args: IArguments) => boolean) | undefined;
+    authorizer : ((endPoint: ServerClass, method: string, args: IArguments) => Promise<boolean>) | undefined;
 }
 interface Request {
     urlPrefix: string,
 }
 export const EndPointsLogging = {
     create : true,
+    connect : true,
     exceptions : true,
     calls : true,
     requests : false,
@@ -395,6 +413,12 @@ export class ServerEndPoints {
             throw new Error('internal error missing __request__ property');
 
         return request.expressServer.getRequest(clientClass, request.sessionId);
+    }
+    getEndPoint<T>(serverClass : new () => T) {
+        const request = this.__request__; // Data saved as part of request handling
+        if (!request || !request.expressServer)
+            throw new Error('internal error missing __request__ property');
+        return request.expressServer.getEndPoint(serverClass, request.sessionId);
     }
     async saveSession() {
         const request = this.__request__;
