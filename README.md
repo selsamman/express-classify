@@ -35,61 +35,67 @@ First define a request interface (embodied as a class) with a set of methods tha
 
 ```typescript
 class UserRequest {
-    async registerUser(user : User, password : string) {}
-    async login(email : string, password : string) {return value as User}
+    async registerUser(_email : string, _name : string, _password : string) {}
+    async login(_email : string, _password : string) {return undefined as unknown as User}
     async logout() {}
 }
 
 class User {
-    first : string;
-    last : string;
-    email : string;
+    constructor(name : string, email : string, password : string) {
+        this.name = name; this.email = email; this.password = password;
+    }
+    name;
+    email;
+    password;
 }
 serializable({User});
 ```
 ### Implement it on the Server
 Then create a class that implements the request and creates an Express endpoint.  A separate instance of the class will be created automatically for each session. Any properties are stored in the session
 ```
-class UserImplementation () extends ServerEndPoint implements UserRequest {
+class UserEndPoint extends ServerEndPoints implements UserRequest {
 
     user : User | undefined; // session data
-    
-    async registerUser(user : User, password : string) {
-        const error = await userManager.register(user, password);
-        if (error)
-           throw new Error(error);
+
+    async registerUser(email : string, name : string, password : string) {
+        users.set(email, new User(email, name, password));
     }
-    
+
     async login(email : string, password : string) {
-        const user = await userManager.fetchUser(email, password);
-        if (!user)
-           throw new Error("invalid email or password");
+        const user = users.get(email);
+        if (!user || user.password != password)
+            throw new Error("invalid email or password");
         else {
-            this.user = user;   
-            return user;
+            this.user = new User(user.name, user.email, '*****');
+            return this.user;
         }
     }
-    
-    logout () {
-        this.user = undefined;
-    } 
+
+    async logout () {
+        if (this.user)
+            this.user = undefined;
+        else
+            throw new Error('No one logged in');
+    }
 }
+const users = new Map<string, User>();
 serializable({UserEndPoint});
 ```
-### Initialize the server in index.ts
+### Initialize the server
 ```
-   import {ExpressServer} from "express-classify"; 
+import {ExpressServer} from "express-classify"; 
 
-   const server = new ExpressServer();
-   server.setPort(webPort);
-   server.createEndPoint("users", UserEndPoint, UserRequest);
-   server.start()
+const expressServer = new ExpressServer();
+expressServer.setPort(80);
+expressServer.createEndPoint("users", UserEndPoint, UserRequest);
+expressServer.start();
 ```
 ### Initialize the client
 ```
-   import {ExpressClient} from "express-classify-client";
+import {ExpressClient} from "express-classify-client";
    
-   const userRequest expressClient.createRequest("users", new UsersRequest());
+const expressClient = new ExpressClient();
+const userRequest = expressClient.createRequest("users", new UserRequest());
 ``` 
 ### Invoke your request method
 Now you can just call your request method.  Either the value will be returned or an exception will be thrown depending on the execution of the server implementation.
@@ -117,11 +123,11 @@ class AlertBrowserRequest {
 And defining a class for the implementation on the browser
 ```
 // On browser
-class AlterBrowserImplementation {
-    sendMessage(msg : string) {
-        alert(`Server said: ${msg}`);
-    }
-}
+        class AlterBrowserImplementation implements AlertBrowserRequest {
+            sendMessage(msg : string) {
+                console.log(`Server said: ${msg}`);
+            }
+        }
 ```
 Then in the browser you create the implementation instance
 ```
@@ -131,20 +137,20 @@ On the server you create the request
 ```
 expressServer.createRequest("hello", BrowserRequest);
 ```
-Note that you don't actually get an instance of the request.  Instead an instance is created for each browser session as you need to invoke the request.
+Note that on the server you don't actually directly create an instance of the request.  Instead, an instance is created for each browser session as you need to invoke the request.
 ### Sending to all Browsers
 To do this you enumerate all sessions and get a request for each:
 ```
-this.expressServer.enumerateSessions( (_, getRequest) => {
-    const browserRequest = getRequest() as BrowserRequest;
+expressServer.enumerateSessions( (_, getRequest) => {
+    const browserRequest = getRequest(BrowserRequest) as BrowserRequest;
     browserRequest.sendMessage('hello out there from the server');
 });
 ```
 Sometimes, however you might need access to session data.  In that case you can also access any server implementation such as the UserRequestImplementation we created earlier
 ```
-this.expressServer.enumerateSessions( (getImplementation, getRequest) => {
-    const browserRequest = getRequest() as BrowserRequest;
-    const userRequestImplementation = getResponse() as UserRequestImplementation
+expressServer.enumerateSessions( (getImplementation, getRequest) => {
+    const browserRequest = getRequest(BrowserRequest) as BrowserRequest;
+    const userRequestImplementation = getResponse(UserRequestImplementation) as UserRequestImplementation
     const name = userRequestImplementation.firstName;
     browserRequest.sendMessage(`Hi ${name} how are you?');
 });

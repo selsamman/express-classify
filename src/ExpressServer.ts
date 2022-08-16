@@ -4,6 +4,8 @@ import Session, {SessionOptions, Store} from "express-session";
 import createMemoryStore from "memorystore";
 import bodyParser from "body-parser";
 import {deserialize, serialize} from "js-freeze-dry";
+import * as http from "http";
+import * as https from "https";
 
 declare module "express-session" {
     interface SessionData {
@@ -30,11 +32,19 @@ export class ExpressServer {
     endPoints : Map<any, EndPoint<any, any>> = new Map();
     requests : Map<any, Request> = new Map();
     staticPaths : [string, string][] = [];
+    key: string | undefined = undefined;
+    cert: string | undefined = undefined;
+    server : http.Server | https.Server | undefined;
 
     log: (message: string) => void = msg => console.log(msg);
 
     setLogger(log : (message: string) => void) {
         this.log = log;
+    }
+
+    setSSL(key: string, cert: string) {
+        this.key = key;
+        this.cert = cert;
     }
 
     setLogLevel(logLevel : Partial<typeof EndPointsLogging>) {
@@ -84,10 +94,19 @@ export class ExpressServer {
         this.app.use(bodyParser.json());
         this.staticPaths.map(s => this.app.use(s[0], express.static(s[1])));
 
-        const httpServer = this.app.listen(this.webPort);
+        this.server = this.cert ?
+            https.createServer({
+                    key: this.key,
+                    cert: this.cert,
+                    requestCert: false, rejectUnauthorized: false
+                },
+                this.app).listen(this.webPort) :
+            http.createServer(this.app).listen(this.webPort);
 
-        this.requests.forEach((request) => this.app.post(`/${request.urlPrefix}`,  async (_req : any, res : any) => {
-            this.log(`${request.urlPrefix} endPoint on server`);
+        // Client must first connect with a post in order to receive a session id
+        this.requests.forEach((request) => this.app.post(`/${request.urlPrefix}`,  async (req : any, res : any) => {
+            if (this.logLevel.connect)
+                this.log(`request ${request.urlPrefix} session ${req.session.id} ready for socket.io connection`);
             res.send({});
         })); // to establish session
 
@@ -95,12 +114,16 @@ export class ExpressServer {
             this.createEndPoints(endPoint.urlPrefix, serverClass, endPoint.clientClass, endPoint.classes, endPoint.authorizer)
         });
 
-        const io = new Server(httpServer);
+        // Use session middleware on socket connection, passing in session details from the socket handshake
+        // This bridges the gap between socket sessions and normal express sessions
+        const io = new Server(this.server);
         const wrap = (session :any) => (socket : any, next : any) => session(socket.handshake, {}, next);
         io.use(wrap(this.session));
 
         this.io = io;
 
+        // When connected retrieve the session info stashed in handshake and store the socket id there
+        // This connects the session to the socket by socket id so it can be retrieved for calling back
         this.io.on("connection", (socket : Socket) => {
             socket.on("disconnect", (reason) => {
                 if (this.logLevel.connect)
@@ -115,6 +138,9 @@ export class ExpressServer {
         });
     }
 
+    // Called to enumerate all sessions and allow a callback the opportunity to instantiate requests and endpoints
+    // The endpoints have their data restored so that the callback can decide what to pass to the request and thus
+    // send back to the browser
     async enumerateSessions<TS, TC> (cb : (
         fetchEndPoint : (serverClass : new () => TS) => TS,
         fetchRequest : (clientClass : new () => TC) => TC,
@@ -161,43 +187,13 @@ export class ExpressServer {
         });
 
     }
-    enumerateEndPointSessions<T extends ServerEndPoints>(endPoint : T, cb : (endPoint : T, session? : any) => void) {
 
-        const endPointDef = this.endPoints.get(endPoint);
-
-        if (!endPointDef)
-            throw new Error (`enumerateEndPointSessions with {$endPoint?.name} which was not setup as endpoint`);
-
-        if (!this.sessionStore.all)
-            throw new Error("A session store with the all method is required");
-
-        this.sessionStore.all((err : any, sessions : any) => {
-            if (!err && sessions) {
-
-                // Walk through all sessions
-                for (const sid in sessions) {
-                    const session = sessions[sid];
-
-                    //console.log(`sendToClients examining session ${sid} socket ${session.socketId}`);
-
-                    const endPoints = (session as any).endPoints;
-                    if (endPoints) {
-                        const sessionString = endPoints[endPointDef.urlPrefix];
-                        if (sessionString) {
-                            const endPointWithSession = Object.create(endPoint);
-                            endPointWithSession.session = deserialize(sessionString, endPointDef.classes).session;
-                            cb(endPointWithSession, session);
-                        }
-                    }
-                };
-            }
-        });
-    }
-
+    // Called to create a request (back to the browser)
     createRequest<T>(urlPrefix : string, serverClass : new () => T, classes : any = {}) {
 
         this.requests.set(serverClass, {urlPrefix});
 
+        // Go through every method in the prototype
         for (const methodName of Object.getOwnPropertyNames(serverClass.prototype)) {
 
             if (methodName === 'constructor' || typeof (serverClass.prototype)[methodName] !== 'function')
@@ -205,6 +201,7 @@ export class ExpressServer {
 
             const expressServer = this;
 
+            // Replace the method with a socket.io call (emit) back to the browser
             serverClass.prototype[methodName] =  async function (...args : any) {
 
                 try {
@@ -239,7 +236,7 @@ export class ExpressServer {
 
     }
 
-
+    // Internal utility function to rehydrate an endpoint with session data saved in the request
     private instantiateEndPoint<T>(urlPrefix : string, session : any, serverClass : new () => T, classes : any) {
 
         if (!session)
@@ -262,6 +259,7 @@ export class ExpressServer {
         return thisEndPoint;
     }
 
+    // Internal function to create an endpoint on the express server
     private createEndPoints<T extends ServerEndPoints, T2>
     (urlPrefix : any, serverClass : new () => T, clientClass : new () => T2, classes : any,
      authorizer? : (endPoint: T, method: string, args: IArguments) => Promise<boolean>) {
@@ -269,6 +267,7 @@ export class ExpressServer {
         const log = this.log || (message => console.log(message));
         const logLevel = this.logLevel || EndPointsLogging;
 
+        // Create an endpoint for each method in the prototype
         for (const name of Object.getOwnPropertyNames(clientClass.prototype)) {
 
             if (name === 'constructor')
@@ -355,10 +354,12 @@ export class ExpressServer {
         });
         return session;
     }
+
     async getSocketFromSessionId(sessionId : any) {
         const session = await this.getSessionFromSessionId(sessionId);
         return this.io.sockets.sockets.get(session.socketId);
     }
+
     async getRequest<T>(clientClass : new () => T, sessionId : any) {
         const socket = await this.getSocketFromSessionId(sessionId);
         if (!socket)
@@ -369,6 +370,7 @@ export class ExpressServer {
         (request as any).__socket__ = socket;
         return request;
     }
+
     async getEndPoint <TS>(serverClass : new () => TS, sessionId : any) {
         const session = await this.getSessionFromSessionId(sessionId);
         const endPointDef = this.endPoints.get(serverClass);
@@ -379,15 +381,19 @@ export class ExpressServer {
 
 }
 
+// Internal representation of an Endpoint classes saved in the ExpressServer object
+// This is to allow deferred creation of the endpoints on the start() method
 interface EndPoint <ServerClass, ClientClass> {
     urlPrefix: string;
     clientClass : new () => ClientClass;
     classes: any;
     authorizer : ((endPoint: ServerClass, method: string, args: IArguments) => Promise<boolean>) | undefined;
 }
+
 interface Request {
     urlPrefix: string,
 }
+
 export const EndPointsLogging = {
     create : true,
     connect : true,
@@ -396,6 +402,8 @@ export const EndPointsLogging = {
     requests : false,
     data : false,
 }
+
+// Representation of an individual endpoint
 // tslint:disable-next-line:max-classes-per-file
 export class ServerEndPoints {
     // tslint:disable-next-line:variable-name
