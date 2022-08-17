@@ -51,7 +51,13 @@ class User {
 serializable({User});
 ```
 ### Implement it on the Server
-Then create a class that implements the request and creates an Express endpoint.  A separate instance of the class will be created automatically for each session. Any properties are stored in the session
+Then create a class that implements the request. This will automatically create an end-point for each method such that:
+* A separate instance of the class will be created automatically for each session.
+* The instance data is serialized and stored in the session
+* An object based on the class will be instantiated when the end-point is invoked
+* The class data will be rehydrated from the session.
+
+This allows the class to function as though it lives for the duration of the session and use member values as session data since any properties are stored in the session.
 ```
 class UserEndPoint extends ServerEndPoints implements UserRequest {
 
@@ -78,6 +84,8 @@ class UserEndPoint extends ServerEndPoints implements UserRequest {
             throw new Error('No one logged in');
     }
 }
+// This example uses a global for users.
+// A scalable implementation would keep this in a database
 const users = new Map<string, User>();
 serializable({UserEndPoint});
 ```
